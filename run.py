@@ -21,12 +21,9 @@ ANALYZER_PORT = getenv(key='ANALYZER_PORT')
 CATEGORIES_SQLI_XSS_INDEX_MAPPING = {
     "sqlis": "analyzer-sqlis",
     "xsss": "analyzer-xsss",
-    "fus": "analyzer-fus"
 }
 
 CATEGORIES_FU_INDEX_MAPPING = {
-    "sqlis": "analyzer-sqlis",
-    "xsss": "analyzer-xsss",
     "fus": "analyzer-fus"
 }
 
