@@ -1,8 +1,8 @@
-from os import getenv
-from flask import Flask, request, jsonify
-import requests
+from flask import Flask, request
 from elasticsearch import Elasticsearch
-import logging
+from json import loads
+from os import getenv
+import requests
 
 
 application = Flask(__name__)
@@ -18,114 +18,60 @@ BACKEND_PORT = getenv(key='BACKEND_PORT')
 ANALYZER_HOST = getenv(key='ANALYZER_HOST')
 ANALYZER_PORT = getenv(key='ANALYZER_PORT')
 
-CATEGORIES_SQLI_XSS_INDEX_MAPPING = {
-    "sqlis": "analyzer-sqlis",
-    "xsss": "analyzer-xsss",
+CATEGORIES_INDEX_MAPPING = {
+    'sqlis': 'analyzer-sqlis',
+    'xsss': 'analyzer-xsss',
+    'fus': 'analyzer-fus'
 }
 
-CATEGORIES_FU_INDEX_MAPPING = {
-    "fus": "analyzer-fus"
-}
-
-es = Elasticsearch(
+response_elasticsearch = Elasticsearch(
     ES_HOST,
     basic_auth=(ES_USER, ES_PASS)
 )
 
-def query_enabled_rules(type_attack: dict):
+def query_enabled_rules():
     enabled_rules = []
-    for category, index_name in type_attack.items():
-        try:
-            query = {'match_all': {}}
-            response = es.search(index=index_name, query=query, size=ES_MAX_RESULT)
-            results = response["hits"]["hits"]
-            for result in results:
-                rule_name = result['_source']['rule_name']
-                enabled_rules.append({
-                    "category": category,
-                    "rule_name": rule_name,
-                    "endpoint": f"/{category}/{rule_name}"
-                })
-        except Exception as e:
-            logging.error(f"Error querying index {index_name}: {e}")
+    for category, index_name in CATEGORIES_INDEX_MAPPING.items():
+        response = response_elasticsearch.search(index=index_name, query={'match_all': {}}, size=ES_MAX_RESULT)
+        results = response['hits']['hits']
+        for result in results:
+            rule_name = result['_source']['rule_name']
+            enabled_rules.append(f'/{category}/{rule_name}')
     return enabled_rules
 
 
-@application.route('/sqlis-xsss', methods=['POST'])
-def forward_proxy_sqli_xss():
+@application.route(rule='/', methods=['POST'])
+def forward_proxy():
+    if response_elasticsearch.ping() is False:
+        return {
+            'type': 'forwarders',
+            'data': None,
+            'reason': 'InternalServerError: Can\'t connect to Elasticsearch'
+        }, 500
     try:
-        payload = request.json
-        if not payload:
-            return jsonify({"error": "Invalid payload: no data provided"}), 400
-        enabled_rules = query_enabled_rules(type_attack=CATEGORIES_SQLI_XSS_INDEX_MAPPING)
-        if not enabled_rules:
-            return jsonify({
-                "status": "failure",
-                "reason": "No enabled rules found"
-            }), 404
-        responses = []
-        for rule in enabled_rules:
-            endpoint_url = f"http://{ANALYZER_HOST}:{ANALYZER_PORT}{rule['endpoint']}"
-            try:
-                response = requests.post(endpoint_url, json=payload)
-                responses.append({
-                    "endpoint": endpoint_url,
-                    "status": response.status_code,
-                    "response": response.json()
-                })
-            except Exception as e:
-                logging.error(f"Error forwarding to {endpoint_url}: {e}")
-                responses.append({
-                    "endpoint": endpoint_url,
-                    "error": str(e)
-                })
-
-        return jsonify({
-            "status": "success",
-            "forwarded_responses": responses
-        }), 200
-
-    except Exception as e:
-        logging.error(f"Error in forward_proxy: {e}")
-        return jsonify({"error": str(e)}), 500
-
-@application.route('/fus', methods=['POST'])
-def forward_proxy_fu():
-    try:
-        payload = request.json
-        if not payload:
-            return jsonify({"error": "Invalid payload: no data provided"}), 400
-        enabled_rules = query_enabled_rules(type_attack=CATEGORIES_FU_INDEX_MAPPING)
-        if not enabled_rules:
-            return jsonify({
-                "status": "failure",
-                "reason": "No enabled rules found"
-            }), 404
-        responses = []
-        for rule in enabled_rules:
-            endpoint_url = f"http://{ANALYZER_HOST}:{ANALYZER_PORT}{rule['endpoint']}"
-            try:
-                response = requests.post(endpoint_url, json=payload)
-                responses.append({
-                    "endpoint": endpoint_url,
-                    "status": response.status_code,
-                    "response": response.json()
-                })
-            except Exception as e:
-                logging.error(f"Error forwarding to {endpoint_url}: {e}")
-                responses.append({
-                    "endpoint": endpoint_url,
-                    "error": str(e)
-                })
-
-        return jsonify({
-            "status": "success",
-            "forwarded_responses": responses
-        }), 200
-
-    except Exception as e:
-        logging.error(f"Error in forward_proxy: {e}")
-        return jsonify({"error": str(e)}), 500
+        payload = loads(request.data)
+    except:
+        return {
+            'type': 'forwarders',
+            'data': None,
+            'reason': 'BadRequest: Body must be JSON'
+        }, 400
+    enabled_rules = query_enabled_rules()
+    for rule in enabled_rules:
+        endpoint_url = f'http://{ANALYZER_HOST}:{ANALYZER_PORT}{rule}'
+        try:
+            response = requests.post(endpoint_url, json=payload, headers={'Content-Type': 'application/json'})
+            if response.status_code != 200:
+                print(f'[Warning] Send payload unsuccessfully with status {response.status_code} to "{rule}"')
+                continue
+        except Exception as error:
+            print(f'[Error] Send payload unsuccessfully with error {str(error)} to "{rule}"')
+            continue
+    return {
+        'type': 'forwarders',
+        'data': None,
+        'reason': 'Success'
+    }
 
 if __name__ == '__main__':
     environment_variables = {
@@ -147,7 +93,12 @@ if __name__ == '__main__':
             print(f'{variable} = {value}')
     print('=========================================================', end='\n\n')
     while True:
-        if es.ping() is True:
+        if response_elasticsearch.ping() is False:
+            continue
+        if (
+            response_elasticsearch.indices.exists(index='analyzer-sqlis') and 
+            response_elasticsearch.indices.exists(index='analyzer-xsss') and 
+            response_elasticsearch.indices.exists(index='analyzer-fus')
+        ):
             break
-    logging.basicConfig(level=logging.INFO)
     application.run(host=BACKEND_HOST, port=BACKEND_PORT)
